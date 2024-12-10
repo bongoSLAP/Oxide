@@ -1,6 +1,26 @@
 mod financial_api_client;
 
 use std::collections::VecDeque;
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "ox")]
+pub struct Cli {
+    #[command(subcommand)]
+    command: Commands
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    Sma {
+        #[arg(short = 's', long = "symbol", help = "The symbol of the stock to be analysed")]
+        symbol: String,
+        #[arg(short = 'w', long = "window-size", help = "The window size of the moving average")]
+        window_size: usize,
+        #[arg(short = 'd', long = "days", help = "The number of working days to analyse")]
+        days: usize,
+    }
+}
 
 pub struct SmaCalculator {
     prices: VecDeque<f32>,
@@ -33,34 +53,68 @@ impl SmaCalculator {
     }
 }
 
+struct SmaDataPoint {
+    date: String,
+    price: f32,
+    sma: f32
+}
+
+impl SmaDataPoint {
+    pub fn new(date: String, price: f32, sma: f32) -> Self {
+        Self {
+            date,
+            price,
+            sma,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let client = financial_api_client::FinancialApiClient::new();
-    let window_size = 5;
-    let series_size = 30;
+    let cli = Cli::parse();
 
-    match client.get_daily_price_data("IONQ").await {
-        Ok(response) => {
-            println!("Data for symbol: {}", response.meta_data.symbol);
+    match cli.command {
+        Commands::Sma { symbol, window_size, days } => {
+            let client = financial_api_client::FinancialApiClient::new();
 
-            let mut dates: Vec<_> = response.time_series.iter().collect();
-            dates.sort_by(|a, b| b.0.cmp(a.0));
+            match client.get_daily_price_data(&symbol).await {
+                Ok(response) => {
+                    println!("Data for symbol: {}", response.meta_data.symbol);
 
-            let mut prices_for_sma: Vec<f32> = Vec::new();
-            for (_, prices) in dates.iter().take(series_size) {
-                prices_for_sma.push(prices.close.parse::<f32>().unwrap());
+                    let mut dates: Vec<_> = response.time_series.iter().collect();
+                    dates.sort_by(|a, b| b.0.cmp(a.0));
+
+                    let mut calculator = SmaCalculator::new(window_size);
+                    let mut data_points: Vec<SmaDataPoint> = Vec::new();
+
+                    for (dates, prices) in dates.iter().take(days) {
+                        let price = prices.close.parse::<f32>().unwrap();
+
+                        calculator.add_price(price);
+                        match calculator.get_simple_moving_average() {
+                            Some(sma) => data_points.push(SmaDataPoint::new(
+                                dates.to_string(),
+                                price,
+                                sma
+                            )),
+                            None => println!("Not enough prices yet for SMA calculation"),
+                        }
+                    }
+
+                    println!("\nDate         | Price   | SMA     | Signal");
+                    println!("---------------|---------|---------|---------");
+
+                    for point in data_points {
+                        let date = chrono::NaiveDate::parse_from_str(&point.date.to_string(), "%Y-%m-%d")
+                            .unwrap()
+                            .format("%a %d/%m/%Y")
+                            .to_string();
+                        let signal = if point.price > point.sma { "↑" } else { "↓" };
+                        println!("{} | {:7.2} | {:7.2} | {}", date, point.price, point.sma, signal);
+                    }
+                },
+                Err(e) => println!("Error fetching data: {}", e),
             }
-
-            let mut calculator = SmaCalculator::new(window_size);
-
-            for price in prices_for_sma {
-                calculator.add_price(price);
-                match calculator.get_simple_moving_average() {
-                    Some(sma) => println!("SMA after adding {}: {}", price, sma),
-                    None => println!("Not enough prices yet for SMA calculation"),
-                }
-            }
-        },
-        Err(e) => println!("Error fetching data: {}", e),
+        }
     }
 }

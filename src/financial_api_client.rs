@@ -8,8 +8,6 @@ pub struct MetaData {
     pub information: String,
     #[serde(rename = "2. Symbol")]
     pub(crate) symbol: String,
-    #[serde(rename = "3. Last Refreshed")]
-    last_refreshed: String,
 }
 
 #[derive(Debug, Deserialize)]
