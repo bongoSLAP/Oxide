@@ -1,7 +1,7 @@
 mod financial_api_client;
-
-use std::collections::VecDeque;
 use clap::{Parser, Subcommand};
+use std::str::FromStr;
+use crate::financial_api_client::{FinancialApiClient, SmaData, TechnicalAnalysisResponse};
 
 #[derive(Parser)]
 #[command(name = "ox")]
@@ -15,56 +15,63 @@ pub enum Commands {
     Sma {
         #[arg(short = 's', long = "symbol", help = "The symbol of the stock to be analysed")]
         symbol: String,
-        #[arg(short = 'w', long = "window-size", help = "The window size of the moving average")]
-        window_size: usize,
-        #[arg(short = 'd', long = "days", help = "The number of working days to analyse")]
-        days: usize,
+        #[arg(short = 'i', long = "interval", help = "The interval (daily, weekly, monthly)")]
+        interval: String,
+        #[arg(short = 'p', long = "time-period", help = "The time period of the moving average")]
+        time_period: usize
     }
 }
 
-pub struct SmaCalculator {
-    prices: VecDeque<f32>,
-    window_size: usize,
-}
-
-impl SmaCalculator {
-    pub fn new(window_size: usize) -> Self {
-        Self {
-            prices: VecDeque::new(),
-            window_size,
-        }
-    }
-
-    pub fn add_price(&mut self, price: f32) {
-        if self.prices.len() == self.window_size {
-            self.prices.pop_front();
-        }
-
-        self.prices.push_back(price);
-    }
-
-    pub fn get_simple_moving_average(&self) -> Option<f32> {
-        if self.prices.len() == self.window_size {
-            Some(self.prices.iter().sum::<f32>() / self.window_size as f32)
-        }
-        else {
-            None
-        }
+async fn handle_sma(symbol: &str, interval: &str, time_period: usize) {
+    let client = FinancialApiClient::new();
+    match client.get_sma(symbol, &interval, time_period).await {
+        Ok(response) => {
+            display_analysis_summary(&response);
+            display_sma_data(&response);
+        },
+        Err(e) => println!("Error fetching data: {}", e),
     }
 }
 
-struct SmaDataPoint {
-    date: String,
-    price: f32,
-    sma: f32
+fn display_analysis_summary(response: &TechnicalAnalysisResponse) {
+    println!("\nTechnical Analysis Summary");
+    println!("------------------------");
+    println!("Symbol: {}", response.meta_data.symbol);
+    println!("Indicator: {}", response.meta_data.indicator);
+    println!("Interval: {}", response.meta_data.interval);
+    println!("Time Period: {}", response.meta_data.time_period);
+    println!("Series Type: {}", response.meta_data.series_type);
+    println!("Last Refreshed: {}", response.meta_data.last_refreshed);
 }
 
-impl SmaDataPoint {
-    pub fn new(date: String, price: f32, sma: f32) -> Self {
-        Self {
-            date,
-            price,
-            sma,
+fn display_sma_data(response: &TechnicalAnalysisResponse) {
+    let mut data_points: Vec<(&String, &SmaData)> = response.technical_analysis.iter().collect();
+    data_points.sort_by(|a, b| b.0.cmp(a.0));
+
+    println!("\nSMA Analysis");
+    println!("-----------");
+    println!("Date           | SMA Value");
+    println!("---------------|----------");
+
+    for (date, sma) in data_points.iter().take(20) {
+        if let Ok(sma_value) = sma.sma.parse::<f64>() {
+            println!("{} | {:>8.2}", date, sma_value);
+        }
+    }
+
+    display_trend_analysis(&data_points);
+}
+
+fn display_trend_analysis(data_points: &[(&String, &SmaData)]) {
+    if let (Some(last), Some(previous)) = (data_points.first(), data_points.get(1)) {
+        if let (Ok(current), Ok(prev)) = (last.1.sma.parse::<f64>(), previous.1.sma.parse::<f64>()) {
+            let change = current - prev;
+            let change_percent = (change / prev) * 100.0;
+
+            println!("\nRecent Movement");
+            println!("--------------");
+            println!("Last Change: {:+.2} ({:+.2}%)", change, change_percent);
+            println!("Trend: {}", if change > 0.0 { "⬆ Upward" } else { "⬇ Downward" });
         }
     }
 }
@@ -74,47 +81,7 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Sma { symbol, window_size, days } => {
-            let client = financial_api_client::FinancialApiClient::new();
-
-            match client.get_daily_price_data(&symbol).await {
-                Ok(response) => {
-                    println!("Data for symbol: {}", response.meta_data.symbol);
-
-                    let mut dates: Vec<_> = response.time_series.iter().collect();
-                    dates.sort_by(|a, b| b.0.cmp(a.0));
-
-                    let mut calculator = SmaCalculator::new(window_size);
-                    let mut data_points: Vec<SmaDataPoint> = Vec::new();
-
-                    for (dates, prices) in dates.iter().take(days) {
-                        let price = prices.close.parse::<f32>().unwrap();
-
-                        calculator.add_price(price);
-                        match calculator.get_simple_moving_average() {
-                            Some(sma) => data_points.push(SmaDataPoint::new(
-                                dates.to_string(),
-                                price,
-                                sma
-                            )),
-                            None => println!("Not enough prices yet for SMA calculation"),
-                        }
-                    }
-
-                    println!("\nDate         | Price   | SMA     | Signal");
-                    println!("---------------|---------|---------|---------");
-
-                    for point in data_points {
-                        let date = chrono::NaiveDate::parse_from_str(&point.date.to_string(), "%Y-%m-%d")
-                            .unwrap()
-                            .format("%a %d/%m/%Y")
-                            .to_string();
-                        let signal = if point.price > point.sma { "↑" } else { "↓" };
-                        println!("{} | {:7.2} | {:7.2} | {}", date, point.price, point.sma, signal);
-                    }
-                },
-                Err(e) => println!("Error fetching data: {}", e),
-            }
-        }
+        Commands::Sma { symbol, interval, time_period } =>
+            handle_sma(&symbol, &interval, time_period).await,
     }
 }
